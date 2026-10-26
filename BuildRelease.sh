@@ -1,3 +1,3 @@
 #!/bin/sh
 
-xcodebuild -project Disk\ Inventory\ X.xcodeproj -configuration Release
+exec "$(dirname "$0")/build-native.sh"

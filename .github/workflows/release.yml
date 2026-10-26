@@ -1,0 +1,97 @@
+name: Release macOS
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag (vX.Y.Z)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Validate release tag
+        id: metadata
+        shell: bash
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            printf 'Expected a stable release tag vX.Y.Z, got: %s\n' "$RELEASE_TAG" >&2
+            exit 2
+          fi
+          printf 'tag=%s\n' "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ steps.metadata.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up packaging Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+          architecture: arm64
+
+      - name: Check toolchain and tag identity
+        shell: bash
+        run: |
+          test "$(uname -m)" = arm64
+          sw_vers
+          xcrun swiftc --version
+          python3 --version
+          if [[ "$GITHUB_EVENT_NAME" == push ]] && [[ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]]; then
+            printf 'The release tag moved after this workflow was triggered.\n' >&2
+            exit 1
+          fi
+
+      - name: Run native scanner and AppKit smoke suite
+        run: ./test-native.sh build/deletion-tree-state.png
+
+      - name: Build versioned DMG, application ZIP and checksums
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: ./release-native.sh "$RELEASE_TAG" "$BUILD_NUMBER"
+
+      - name: Publish complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          NAME="DiskInventoryX2-$VERSION-arm64"
+          gh release create "$RELEASE_TAG" \
+            "build/release/$NAME.dmg" \
+            "build/release/$NAME.app.zip" \
+            build/release/SHA256SUMS.txt \
+            --verify-tag --draft --generate-notes \
+            --title "Disk Inventory X2 $VERSION" \
+            --notes "Apple Silicon only; macOS 14 or later. Download the DMG for drag-and-drop installation, or the ZIP containing the complete app bundle. This build is ad-hoc signed, not Developer ID signed or notarized by Apple. SHA256SUMS.txt covers both downloads."
+          gh release edit "$RELEASE_TAG" --draft=false --latest
+
+      - name: Retain native view captures on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: smoke-views-${{ steps.metadata.outputs.tag }}-${{ github.run_attempt }}
+          path: build/*.png
+          if-no-files-found: ignore
+          retention-days: 7

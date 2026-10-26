@@ -1,0 +1,25 @@
+# Generated application, installers, local measurements and packaging environment.
+/build/
+/.build/
+/DerivedData/
+
+# Optional upstream reference checkouts; not native build dependencies.
+/Dependencies/
+
+# macOS and local Xcode state.
+.DS_Store
+xcuserdata/
+*.xcuserstate
+
+# Local Python environments and bytecode.
+.venv/
+__pycache__/
+*.py[cod]
+
+# Local credentials and signing material.
+.env
+.env.*
+!.env.example
+*.p12
+*.p8
+*.mobileprovision

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>DiskInventoryX2</string>
+<key>CFBundleIdentifier</key><string>local.diskinventoryx.native</string>
+<key>CFBundleName</key><string>Disk Inventory X2</string>
+<key>CFBundleDisplayName</key><string>Disk Inventory X2</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleIconFile</key><string>AppIcon.icns</string>
+<key>CFBundleShortVersionString</key><string>2.0.0</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>LSMinimumSystemVersion</key><string>14.0</string>
+<key>NSHighResolutionCapable</key><true/>
+<key>NSPrincipalClass</key><string>NSApplication</string>
+<key>NSHumanReadableCopyright</key><string>Disk Inventory X2 native edition. Original application © Tjark Derlien. GPL-3.0; see bundled COPYING.</string>
+<key>NSDesktopFolderUsageDescription</key><string>Disk Inventory X2 needs access to Desktop file metadata in your selected scan to measure names, types and sizes. Scanning does not read file contents or delete files.</string>
+<key>NSDocumentsFolderUsageDescription</key><string>Disk Inventory X2 needs access to Documents file metadata in your selected scan to measure names, types and sizes. Scanning does not read file contents or delete files.</string>
+<key>NSDownloadsFolderUsageDescription</key><string>Disk Inventory X2 needs access to Downloads file metadata in your selected scan to measure names, types and sizes. Scanning does not read file contents or delete files.</string>
+<key>NSPhotoLibraryUsageDescription</key><string>Disk Inventory X2 needs access to photo library file metadata in your selected scan to measure names, types and sizes. Scanning does not read photos or other file contents, download cloud files or delete files.</string>
+<key>NSContactsUsageDescription</key><string>Disk Inventory X2 needs access to contact database file metadata in your selected scan to measure names, types and sizes. Scanning does not read contact records or other file contents or delete files.</string>
+<key>NSCalendarsUsageDescription</key><string>Disk Inventory X2 needs access to calendar database file metadata in your selected scan to measure names, types and sizes. Scanning does not read calendar events or other file contents or delete files.</string>
+<key>NSCalendarsFullAccessUsageDescription</key><string>Disk Inventory X2 needs access to calendar database file metadata in your selected scan to measure names, types and sizes. Scanning does not read or change calendar events, read other file contents or delete files.</string>
+<key>NSRemindersUsageDescription</key><string>Disk Inventory X2 needs access to reminder database file metadata in your selected scan to measure names, types and sizes. Scanning does not read reminders or other file contents or delete files.</string>
+<key>NSRemindersFullAccessUsageDescription</key><string>Disk Inventory X2 needs access to reminder database file metadata in your selected scan to measure names, types and sizes. Scanning does not read or change reminders, read other file contents or delete files.</string>
+<key>NSNetworkVolumesUsageDescription</key><string>Disk Inventory X2 needs access to file metadata on selected, already-mounted network volumes to measure names, types and sizes. Scanning does not read file contents, mount other volumes or delete files.</string>
+<key>NSRemovableVolumesUsageDescription</key><string>Disk Inventory X2 needs access to file metadata on selected, already-mounted removable volumes to measure names, types and sizes. Scanning does not read file contents, mount other volumes or delete files.</string>
+<key>NSSystemAdministrationUsageDescription</key><string>Disk Inventory X2 needs access to protected system file metadata in your selected scan to measure names, types and sizes. Scanning does not read file contents, change system settings or delete files.</string>
+<key>NSAppDataUsageDescription</key><string>Disk Inventory X2 needs access to other applications’ data file metadata in your selected scan to measure names, types and sizes. Scanning does not read file contents, change application data or delete files.</string>
+<key>NSAppBundlesUsageDescription</key><string>Disk Inventory X2 needs access to application bundle file metadata in your selected scan to measure names, types and sizes. Scanning does not read file contents, modify applications or delete files.</string>
+<key>NSFileProviderDomainUsageDescription</key><string>Disk Inventory X2 needs access to file provider metadata in your selected scan to measure names, types and sizes. Scanning does not read file contents, download cloud files or delete files.</string>
+<key>NSAppleMusicUsageDescription</key><string>Disk Inventory X2 needs access to media library file metadata in your selected scan to measure names, types and sizes. Scanning does not play media, read file contents, download cloud files or delete files.</string>
+</dict></plist>
