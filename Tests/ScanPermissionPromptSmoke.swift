@@ -155,7 +155,8 @@ struct ScanPermissionPromptSmoke {
         progress.beginCheckingAccess(on: window, url: selectedRoot)
         progress.checkingAccess(report.denied[0].target)
         progress.begin(on: window, url: selectedRoot)
-        try check(try field("scanPath", in: sheet).stringValue == selectedRoot.path && (try field("scanProgressStatistics", in: sheet)).stringValue.isEmpty, "Normal begin retained stale probe state")
+        try check(try field("scanPath", in: sheet).stringValue == selectedRoot.path && !(try field("scanProgressStatistics", in: sheet)).stringValue.contains(ScanPermissionPresentation.category(.documents)), "Normal begin retained stale probe state")
+        try check(try field("scanVolumeUsage", in: sheet).stringValue.isEmpty, "Folder scan fabricated a whole-volume used figure")
         print("PASS: actual AppKit permission summary; explicit continue and default Cancel; scoped denied paths; manual Privacy/FDA navigation aborts; metadata-check path/category and reading reset")
     }
 }

@@ -40,6 +40,16 @@ struct DeletionTreeStateSmoke {
         Mirror(reflecting: controller).children.first { $0.label == name }?.value as? T
     }
 
+    @MainActor private static func checkStatistics(_ controller: InventoryWindowController, root: DiskNode, showPackageContents: Bool) throws {
+        guard let actual = value("typeRows", from: controller, as: [FileTypeStat].self) else {
+            throw Failure(description: "Missing displayed kind statistics")
+        }
+        let expected = root.index.presentationStatistics(for: root.id, showPackageContents: showPackageContents)
+        try check(actual.count == expected.count && zip(actual, expected).allSatisfy {
+            $0.0.kindID == $0.1.kindID && $0.0.name == $0.1.name && $0.0.size == $0.1.size && $0.0.count == $0.1.count
+        }, "Deletion displayed stale or incorrectly scoped kind statistics")
+    }
+
     @MainActor private static func row(_ url: URL, in outline: NSOutlineView) throws -> Int {
         guard let row = (0..<outline.numberOfRows).first(where: {
             (outline.item(atRow: $0) as? DiskNode)?.url.path == url.path
@@ -158,6 +168,16 @@ struct DeletionTreeStateSmoke {
         try check(expanded(in: outline) == expected, "Deleting an expanded directory collapsed surviving branches")
         try check(!FileManager.default.fileExists(atPath: removeDirectory.path), "Confirmed directory still exists")
         try check(map.root!.size == beforeSize - 8_000_000 && map.root!.fileCount == beforeCount - 1, "Deletion did not reconcile sizes/counts")
+        try checkStatistics(controller, root: map.root!, showPackageContents: false)
+        let baselineMap = TreemapView(frame: .zero)
+        let precomputedMap = TreemapView(frame: .zero)
+        baselineMap.root = beforeIndex.root
+        precomputedMap.root = beforeIndex.root
+        baselineMap.root = map.root
+        precomputedMap.setRoot(map.root!, fullIndexStatistics: map.root!.index.presentationStatistics(for: 0))
+        for kind in map.root!.index.kinds.indices {
+            try check(baselineMap.color(for: UInt32(kind)) == precomputedMap.color(for: UInt32(kind)), "Precomputed palette changed kind colors")
+        }
         try check(selected(in: outline)?.path == active.path, "Deleted selection did not fall back to its surviving parent")
         let newOffset = outline.rect(ofRow: try row(anchor, in: outline)).minY - outline.visibleRect.minY
         try check(abs(newOffset - oldOffset) < 0.5, "Viewport jumped after deletion and size-based sibling reordering")
@@ -188,6 +208,7 @@ struct DeletionTreeStateSmoke {
         try await remove(keepB.appendingPathComponent("Deep/b.bin"), controller: controller, outline: outline, keyCode: nil)
         try check(map.root!.url.path == active.path, "Deletion changed the zoom scope")
         try check(expanded(in: outline) == zoomedExpanded.subtracting([keepB.appendingPathComponent("Deep").path]), "Menu deletion lost zoomed expansion state")
+        try checkStatistics(controller, root: map.root!, showPackageContents: false)
         try check(selected(in: outline)?.path == keepB.appendingPathComponent("Deep").path, "Last child deletion did not retain the now-empty parent selection")
         controller.zoomOut()
         try check(map.root!.url.path == main.path && map.root!.size == beforeSize - 13_000_000, "Zoom Out restored stale deletion totals")
@@ -203,6 +224,21 @@ struct DeletionTreeStateSmoke {
         try check(selected(in: outline)?.path == last.path && outline.numberOfRows == 1, "Direct child deletion did not select the next surviving row")
         try await remove(last, controller: controller, outline: outline)
         try check(outline.numberOfRows == 0 && outline.selectedRow == -1 && map.root!.size == 0, "Last root child deletion did not produce an empty tree")
+
+        let packages = fixture.appendingPathComponent("Packages")
+        let package = packages.appendingPathComponent("Sample.app")
+        let firstRemoval = packages.appendingPathComponent("first.txt")
+        let secondRemoval = packages.appendingPathComponent("second.txt")
+        try file(package.appendingPathComponent("Contents/inside.txt"), size: 3000)
+        try file(firstRemoval, size: 2000)
+        try file(secondRemoval, size: 1000)
+        controller.present(try await scan(packages))
+        try check(map.root!.index.find(url: package)?.isPackage == true, "Package fixture was not recognized")
+        try await remove(firstRemoval, controller: controller, outline: outline)
+        try checkStatistics(controller, root: map.root!, showPackageContents: false)
+        controller.togglePackageContents()
+        try await remove(secondRemoval, controller: controller, outline: outline)
+        try checkStatistics(controller, root: map.root!, showPackageContents: true)
         window.close()
         print("PASS: real Shift-Delete directory/file and menu deletion; surviving expanded branches and collapsed branches; viewport anchor after size reordering; parent/next-row selection; selection changed during deletion; Cancel; zoomed scope/history; empty tree")
     }
@@ -216,6 +252,7 @@ struct DeletionTreeStateSmoke {
                 try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
                 try await SystemPathPolicySmoke.run(root: fixture.appendingPathComponent("SystemPaths"))
                 try await HardLinkAccountingSmoke.run(root: fixture.appendingPathComponent("HardLinks"))
+                try await CloneFileMetadataSmoke.run(root: fixture.appendingPathComponent("CloneMetadata"))
                 try await ScanSafetySmoke.run(root: fixture.appendingPathComponent("Safety"))
                 try await ScanPresentationSmoke.run(root: fixture.appendingPathComponent("Presentation"))
                 try await ScanPermissionScopeSmoke.run(root: fixture.appendingPathComponent("PermissionScope"))

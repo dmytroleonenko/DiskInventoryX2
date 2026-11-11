@@ -156,12 +156,15 @@ struct ScanPresentationSmoke {
             try check(info.stringValue.contains(label) && map.toolTip?.contains(label) == true, "Hovered \(state) details omitted status")
         }
 
-        let positive = String.localizedStringWithFormat(
-            String(localized: "space.unaccounted", defaultValue: "Full scan allocated %@ • Not accounted by scan %@"),
-            ByteCountFormatter.string(fromByteCount: 250_000, countStyle: .file), ByteCountFormatter.string(fromByteCount: 450_000, countStyle: .file)
+        let formatted: (Int64) -> String = { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) }
+        for amount in [Int64(1_000_000), 700_000, 300_000, 250_000, 450_000] {
+            try check(footer.stringValue.contains(formatted(amount)), "Footer omitted a volume or scan accounting amount: \(amount)")
+        }
+        let progressUsage = ScanEntryPresentation.progressVolumeUsage(
+            VolumeSpaceSnapshot(volumeURL: fixture, capacityBytes: 1_000_000, freeBytes: 300_000)
         )
-        try check(footer.stringValue.contains(positive), "Footer did not show independently computed positive residual")
-        try check(footer.stringValue.contains(ByteCountFormatter.string(fromByteCount: 700_000, countStyle: .file)), "Footer omitted volume used bytes")
+        try check(progressUsage.contains(formatted(700_000)) && progressUsage.contains(formatted(300_000)),
+                  "Progress omitted used or available capacity")
         let originalFooter = footer.stringValue
         try select(fixture.appendingPathComponent("zoomable"), in: outline)
         controller.zoomSelection()
@@ -177,11 +180,8 @@ struct ScanPresentationSmoke {
 
         let excessIndex = index.withVolumeSpace(VolumeSpaceSnapshot(volumeURL: fixture, capacityBytes: 1_000_000, freeBytes: 900_000))
         controller.present(result(excessIndex))
-        let excess = String.localizedStringWithFormat(
-            String(localized: "space.excess", defaultValue: "Full scan allocated %@ • Allocation exceeds volume used by %@ (shared blocks / accounting scope)"),
-            ByteCountFormatter.string(fromByteCount: 250_000, countStyle: .file), ByteCountFormatter.string(fromByteCount: 150_000, countStyle: .file)
-        )
-        try check(footer.stringValue.contains(excess) && !footer.stringValue.contains(positive), "Footer hid excess allocation or invented negative snapshot bytes")
+        try check(footer.stringValue.contains(formatted(150_000)) && !footer.stringValue.contains(formatted(450_000)),
+                  "Footer hid excess allocation or retained the old positive residual")
         let excessFooter = footer.stringValue
         try select(fixture.appendingPathComponent("zoomable"), in: outline)
         controller.zoomSelection()
@@ -191,7 +191,7 @@ struct ScanPresentationSmoke {
         try check(footer.stringValue == excessFooter && map.root?.index.sizeMode == .logical, "Excess summary changed under zoom/mode/selection")
         controller.zoomOut()
         controller.present(result(index.withVolumeSpace(nil)))
-        try check(footer.stringValue == String(localized: "space.unavailable", defaultValue: "Volume space snapshot unavailable; unaccounted space cannot be determined."), "Missing snapshot invented volume totals")
+        try check(footer.stringValue == String(localized: "space.unavailable", defaultValue: "Volume space snapshot unavailable. The scanned allocation is still an attribution estimate, not disk used; unattributed space cannot be determined."), "Missing snapshot invented volume totals")
         controller.present(result(index))
         try select(mounted, in: outline)
         controller.zoomSelection()

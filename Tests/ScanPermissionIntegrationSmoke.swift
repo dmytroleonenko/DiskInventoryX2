@@ -73,6 +73,71 @@ struct ScanPermissionIntegrationSmoke {
         try check(decision.shown, "Real denied-directory preflight skipped the upfront permission decision")
     }
 
+    private static func checkProgressSizing(_ baseline: ScanResult) async throws {
+        let parent = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 600),
+                              styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        parent.isReleasedWhenClosed = false
+        parent.orderFront(nil)
+        defer { parent.close() }
+        let progress = ScanProgressController()
+        progress.beginCheckingAccess(on: parent, url: baseline.request.url)
+        defer { progress.finish() }
+        guard let panel = progress.window, let content = panel.contentView,
+              let path = views(content).compactMap({ $0 as? NSTextField }).first(where: { $0.accessibilityIdentifier() == "scanPath" }),
+              let statistics = views(content).compactMap({ $0 as? NSTextField }).first(where: { $0.accessibilityIdentifier() == "scanProgressStatistics" }),
+              let volumeUsage = views(content).compactMap({ $0 as? NSTextField }).first(where: { $0.accessibilityIdentifier() == "scanVolumeUsage" }),
+              let cancel = views(content).compactMap({ $0 as? NSButton }).first(where: { $0.accessibilityIdentifier() == "cancelScan" }) else {
+            throw Failure(description: "Missing real scan progress sheet controls")
+        }
+        content.layoutSubtreeIfNeeded()
+        let size = panel.frame.size
+        let parentFrame = parent.frame
+        let pathHeight = path.frame.height
+        let longURL = URL(fileURLWithPath: "/" + Array(repeating: String(repeating: "directory-", count: 18), count: 5).joined(separator: "/"))
+        for checkingAccess in [true, false] {
+            if !checkingAccess { progress.beginReading() }
+            for url in [longURL, baseline.request.url, longURL] {
+                if checkingAccess {
+                    progress.checkingAccess(ScanPermissionTarget(url: url, kind: .documents))
+                } else {
+                    progress.update(ScanResult(root: baseline.root, skippedCount: 123,
+                        request: baseline.request, isComplete: false, currentPath: url.path,
+                        typeStatistics: baseline.typeStatistics))
+                }
+                await withCheckedContinuation { continuation in
+                    DispatchQueue.main.async { continuation.resume() }
+                }
+                content.layoutSubtreeIfNeeded()
+                panel.displayIfNeeded()
+                try check(panel.frame.size == size && parent.frame == parentFrame, "Progress path resized the sheet or its parent")
+                try check(content.fittingSize.width <= content.bounds.width, "Progress path increased the dialog's fitting width")
+                try check(path.stringValue == url.path && path.frame.height == pathHeight, "Progress path lost its full value or wrapped")
+                if !checkingAccess {
+                    try check(statistics.stringValue.contains("123"), "Progress omitted the skipped-file count")
+                    try check(volumeUsage.stringValue.isEmpty, "Subfolder progress invented whole-volume used capacity")
+                }
+                try check(content.bounds.contains(cancel.frame), "Long progress path pushed Cancel outside the sheet")
+            }
+        }
+        if let argument = CommandLine.arguments.dropFirst().first {
+            let output = URL(fileURLWithPath: argument).deletingLastPathComponent().appendingPathComponent("scan-progress-long-path.png")
+            content.wantsLayer = true
+            content.effectiveAppearance.performAsCurrentDrawingAppearance {
+                content.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+            }
+            content.displayIfNeeded()
+            guard let bitmap = content.bitmapImageRepForCachingDisplay(in: content.bounds) else {
+                throw Failure(description: "Cannot capture scan progress sheet")
+            }
+            content.cacheDisplay(in: content.bounds, to: bitmap)
+            guard let png = bitmap.representation(using: .png, properties: [:]) else {
+                throw Failure(description: "Cannot encode scan progress sheet")
+            }
+            try png.write(to: output)
+        }
+        print("PASS: real progress sheet retains its size and parent geometry through long/short permission and scan paths; single-line path and Cancel stay in bounds")
+    }
+
     static func run(root: URL) async throws {
         let manager = FileManager.default
         let baselineRoot = root.appendingPathComponent("Completed", isDirectory: true)
@@ -91,6 +156,7 @@ struct ScanPermissionIntegrationSmoke {
         defer { chmod(documents.path, S_IRWXU) }
 
         let baseline = try await scan(baselineRoot)
+        try await checkProgressSizing(baseline)
         let controller = InventoryWindowController(permissions: ScanPermissionService(homeDirectory: home))
         controller.showWindow(nil)
         defer { controller.window?.close() }

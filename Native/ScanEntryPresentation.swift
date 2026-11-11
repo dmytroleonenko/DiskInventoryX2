@@ -87,31 +87,40 @@ struct ScanEntryPresentation {
     }
 
     static var volumeExplanation: String {
-        String(localized: "space.explanation", defaultValue: "The scan allocation covers the full scan root, including when zoomed or displaying logical sizes. Not accounted space can include snapshots, filesystem metadata, unreadable or excluded data, and other volumes in a shared APFS container. Excess allocation can reflect shared APFS blocks or different accounting scopes. These are filesystem snapshots, not exact reclaimable space; no snapshot size is inferred.")
+        String(localized: "space.explanation", defaultValue: "Capacity and available space come from the filesystem at scan completion; used is capacity minus available and may include other volumes sharing an APFS container. The scanned allocation is an attribution estimate for the scanned root only, even when zoomed or showing logical sizes: it is not disk used and it does not measure reclaimable space. APFS clones that the scan can prove identical are counted once; partially shared blocks may still be counted for every file that shares them. Unattributed space can include snapshots, filesystem metadata, unreadable or excluded data, and other volumes in a shared APFS container.")
+    }
+
+    /// Filesystem-reported use sampled once when a whole mounted volume is scanned.
+    /// Subfolder scopes never produce a snapshot, so no volume total is fabricated.
+    static func progressVolumeUsage(_ snapshot: VolumeSpaceSnapshot) -> String {
+        String.localizedStringWithFormat(
+            String(localized: "scan.volumeUsed", defaultValue: "Capacity used at scan start %@ • Available %@"),
+            bytes(snapshot.usedBytes), bytes(snapshot.freeBytes)
+        )
     }
 
     static func volumeSummary(_ index: DiskIndex) -> String {
         guard let snapshot = index.volumeSpace else {
-            return String(localized: "space.unavailable", defaultValue: "Volume space snapshot unavailable; unaccounted space cannot be determined.")
+            return String(localized: "space.unavailable", defaultValue: "Volume space snapshot unavailable. The scanned allocation is still an attribution estimate, not disk used; unattributed space cannot be determined.")
         }
         let allocated = index.entry(at: 0).allocatedSize
         let used = snapshot.usedBytes
         let totals = String.localizedStringWithFormat(
-            String(localized: "space.totals", defaultValue: "Volume %@ — Capacity %@ • Used %@ • Free %@"),
+            String(localized: "space.totals", defaultValue: "Volume %@ — Capacity %@ • Capacity used %@ • Available %@"),
             snapshot.volumeURL.path, bytes(snapshot.capacityBytes), bytes(used), bytes(snapshot.freeBytes)
         )
         let accounting: String
         if allocated > used {
             accounting = String.localizedStringWithFormat(
-                String(localized: "space.excess", defaultValue: "Full scan allocated %@ • Allocation exceeds volume used by %@ (shared blocks / accounting scope)"),
+                String(localized: "space.excess", defaultValue: "Scanned allocation estimate %@ • Estimate exceeds reported volume use by %@ — shared or partially shared APFS blocks may be counted more than once"),
                 bytes(allocated), bytes(allocated - used)
             )
         } else {
             accounting = String.localizedStringWithFormat(
-                String(localized: "space.unaccounted", defaultValue: "Full scan allocated %@ • Not accounted by scan %@"),
+                String(localized: "space.unaccounted", defaultValue: "Scanned allocation estimate %@ • Not attributed by scan %@ (estimate, not disk used)"),
                 bytes(allocated), bytes(used - allocated)
             )
         }
-        return totals + "\n" + accounting + "\n" + String(localized: "space.disclaimer", defaultValue: "Snapshot, not reclaimable space. Unaccounted bytes may include snapshots, metadata, excluded data and shared-container volumes.")
+        return totals + "\n" + accounting + "\n" + String(localized: "space.disclaimer", defaultValue: "Scan figures are estimates, not disk used and not reclaimable space. Unattributed bytes may include snapshots, filesystem metadata, excluded data and shared-container volumes. Only provably identical APFS clones are counted once; partially shared blocks may still be counted repeatedly.")
     }
 }

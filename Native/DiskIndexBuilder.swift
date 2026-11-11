@@ -13,6 +13,8 @@ final class DiskIndexBuilder {
     private var histograms: [DiskIndex.Bin] = []
     private var hardLinks: [Int: HardLinkRecord] = [:]
     private var hardLinkOwners: [FileIdentity: Int] = [:]
+    private var clones: [Int: CloneRecord] = [:]
+    private var cloneOwners: [CloneFileMetadata.Identity: Int] = [:]
 
     init(rootURL: URL, sizeMode: DiskSizeMode = .physical, kinds: [DiskFileKind] = [.data]) {
         self.rootURL = rootURL
@@ -36,7 +38,8 @@ final class DiskIndexBuilder {
         parent: Int, name: String, logicalSize: Int64 = 0, allocatedSize: Int64 = 0,
         fileCount: Int = 0, isDirectory: Bool, kind: UInt32 = 0,
         isPackage: Bool = false, isAggregate: Bool = false, bins: [DiskIndex.Bin] = [],
-        scanStatus: ScanEntryStatus = .complete, hardLink: FileIdentity? = nil
+        scanStatus: ScanEntryStatus = .complete, hardLink: FileIdentity? = nil,
+        cloneIdentity: CloneFileMetadata.Identity? = nil, cloneDataAllocatedSize: Int64 = 0
     ) -> Int {
         let nameID: UInt32
         if let existing = nameIDs[name] {
@@ -63,6 +66,26 @@ final class DiskIndexBuilder {
             hardLinks[id] = HardLinkRecord(
                 identity: hardLink, logicalSize: logicalSize, allocatedSize: allocatedSize, ownerID: owner
             )
+        }
+        if let cloneIdentity, !isDirectory, !isAggregate, bins.isEmpty {
+            let shared = CloneChargeLedger.sharedBytes(
+                allocatedSize: allocatedSize, dataAllocatedSize: cloneDataAllocatedSize
+            )
+            if let existing = cloneOwners[cloneIdentity] {
+                chargedAllocatedSize -= min(shared, chargedAllocatedSize)
+                clones[id] = CloneRecord(
+                    identity: cloneIdentity, logicalSize: logicalSize, allocatedSize: allocatedSize,
+                    sharedDataAllocatedSize: shared, ownerID: existing
+                )
+            } else if chargedAllocatedSize > 0 {
+                // A clone whose entire allocation is already charged elsewhere (a hard-link
+                // alias) must not claim ownership of the extent group.
+                cloneOwners[cloneIdentity] = id
+                clones[id] = CloneRecord(
+                    identity: cloneIdentity, logicalSize: logicalSize, allocatedSize: allocatedSize,
+                    sharedDataAllocatedSize: shared, ownerID: id
+                )
+            }
         }
         entries.append(DiskIndex.Entry(
             logicalSize: chargedLogicalSize, allocatedSize: chargedAllocatedSize,
@@ -125,7 +148,7 @@ final class DiskIndexBuilder {
         return DiskIndex(
             rootURL: rootURL, sizeMode: sizeMode, kinds: kinds,
             entries: entries, names: names, childLinks: links, histograms: histograms,
-            hardLinks: hardLinks, volumeSpace: volumeSpace
+            hardLinks: hardLinks, clones: clones, volumeSpace: volumeSpace
         )
     }
 }

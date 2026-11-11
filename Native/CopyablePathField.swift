@@ -15,9 +15,16 @@ final class CopyablePathField: NSTextField {
         isSelectable = false
         isBordered = false
         drawsBackground = false
+        maximumNumberOfLines = 1
+        cell?.usesSingleLineMode = true
     }
 
     required init?(coder: NSCoder) { fatalError("Use init(pasteboard:)") }
+
+    override var intrinsicContentSize: NSSize {
+        // The footer follows the user's window width, never the path's natural width.
+        NSSize(width: NSView.noIntrinsicMetric, height: super.intrinsicContentSize.height)
+    }
 
     func display(_ text: String, path url: URL? = nil, details: String? = nil) {
         let newPath = url?.path

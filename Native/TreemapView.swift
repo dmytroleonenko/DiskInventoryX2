@@ -10,6 +10,15 @@ final class TreemapView: NSView {
             invalidateLayout()
         }
     }
+
+    /// The statistics must cover the arena root with the current package presentation.
+    func setRoot(_ node: DiskNode, fullIndexStatistics: [FileTypeStat]?) {
+        if let fullIndexStatistics, paletteIndex !== node.index {
+            palette.reserve(statistics: fullIndexStatistics, in: node.index)
+            paletteIndex = node.index
+        }
+        root = node
+    }
     var selectedNode: DiskNode? {
         didSet {
             guard !sameNode(selectedNode, oldValue) else { return }

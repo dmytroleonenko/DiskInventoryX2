@@ -57,12 +57,15 @@ final class DiskIndex: Sendable {
     private let histograms: [Bin]
     private let progressTotals: ScanTypeAccumulator?
     private let hardLinks: [Int: HardLinkRecord]
+    private let clones: [Int: CloneRecord]
+    private let tombstoneCount: Int
 
     init(
         rootURL: URL, sizeMode: DiskSizeMode = .physical, kinds: [DiskFileKind],
         entries: [Entry], names: [String], childLinks: [Int], histograms: [Bin],
         progressTotals: ScanTypeAccumulator? = nil, hardLinks: [Int: HardLinkRecord] = [:],
-        volumeSpace: VolumeSpaceSnapshot? = nil
+        clones: [Int: CloneRecord] = [:],
+        volumeSpace: VolumeSpaceSnapshot? = nil, tombstoneCount: Int = 0
     ) {
         self.rootURL = rootURL
         self.sizeMode = sizeMode
@@ -73,7 +76,9 @@ final class DiskIndex: Sendable {
         self.histograms = histograms
         self.progressTotals = progressTotals
         self.hardLinks = hardLinks
+        self.clones = clones
         self.volumeSpace = volumeSpace
+        self.tombstoneCount = tombstoneCount
     }
 
     var root: DiskNode { node(at: 0) }
@@ -85,9 +90,10 @@ final class DiskIndex: Sendable {
     func entry(at id: Int) -> Entry { entries[id] }
     func name(of id: Int) -> String { names[Int(entries[id].name)] }
     func hardLink(at id: Int) -> HardLinkRecord? { hardLinks[id] }
+    func clone(at id: Int) -> CloneRecord? { clones[id] }
 
     var unavailableEntryCount: Int {
-        entries.reduce(0) { $0 + ($1.ownScanStatus == .complete ? 0 : 1) }
+        entries.reduce(0) { $0 + ($1.parent == -2 || $1.ownScanStatus == .complete ? 0 : 1) }
     }
 
     func childIDs(of id: Int) -> ArraySlice<Int> {
@@ -172,7 +178,7 @@ final class DiskIndex: Sendable {
         return DiskIndex(
             rootURL: rootURL, sizeMode: mode, kinds: kinds, entries: entries, names: names,
             childLinks: links, histograms: histograms, progressTotals: progressTotals,
-            hardLinks: hardLinks, volumeSpace: volumeSpace
+            hardLinks: hardLinks, clones: clones, volumeSpace: volumeSpace, tombstoneCount: tombstoneCount
         )
     }
 
@@ -181,13 +187,13 @@ final class DiskIndex: Sendable {
         DiskIndex(
             rootURL: rootURL, sizeMode: sizeMode, kinds: kinds, entries: entries, names: names,
             childLinks: childLinks, histograms: histograms, progressTotals: progressTotals,
-            hardLinks: hardLinks, volumeSpace: snapshot
+            hardLinks: hardLinks, clones: clones, volumeSpace: snapshot, tombstoneCount: tombstoneCount
         )
     }
 
     static func sortChildren(_ links: inout [Int], entries: [Entry], names: [String], sizeMode: DiskSizeMode) {
         links.withUnsafeMutableBufferPointer { buffer in
-            for entry in entries where entry.childCount > 1 {
+            for entry in entries where entry.parent != -2 && entry.childCount > 1 {
                 let start = Int(entry.childStart)
                 let end = start + Int(entry.childCount)
                 var children = UnsafeMutableBufferPointer(rebasing: buffer[start..<end])
@@ -272,10 +278,76 @@ final class DiskIndex: Sendable {
         return node(at: current)
     }
 
-    /// Rebuilds the remaining arena, including pooled names, without filesystem I/O.
+    /// Removes an unshared subtree by updating only its ancestors and their child order.
+    /// Entries retain stable IDs; removed entries are tombstones until the next rebuild.
     func removingSubtree(at id: Int) -> DiskIndex {
-        guard id > 0, entries.indices.contains(id) else { return self }
-        return rebuilding(excluding: id)
+        guard id > 0, entries.indices.contains(id), entries[id].parent >= 0 else { return self }
+        var removed: [Int] = [id]
+        var cursor = 0
+        while cursor < removed.count {
+            let current = removed[cursor]
+            // Ownership of a hard link or clone may transfer outside the subtree.
+            // Rebuild in that case to preserve the builder's accounting rules.
+            if hardLinks[current] != nil || clones[current] != nil {
+                return rebuilding(excluding: id)
+            }
+            removed.append(contentsOf: childIDs(of: current))
+            cursor += 1
+        }
+        // Bound retained dead storage and periodically compact after repeated deletions.
+        if tombstoneCount + removed.count > max(64, entries.count / 4) {
+            return rebuilding(excluding: id)
+        }
+
+        let removedEntry = entries[id]
+        let parent = Int(removedEntry.parent)
+        let siblings = childIDs(of: parent).filter { $0 != id }
+        // Replaced child ranges remain in the shared arena until compaction.
+        if childLinks.count + siblings.count > min(Int(Int32.max), entries.count * 2) {
+            return rebuilding(excluding: id)
+        }
+        var updatedEntries = entries
+        var updatedLinks = childLinks
+        updatedEntries[parent].childStart = Int32(updatedLinks.count)
+        updatedEntries[parent].childCount = Int32(siblings.count)
+        updatedLinks.append(contentsOf: siblings)
+        for removedID in removed { updatedEntries[removedID].parent = -2 }
+
+        var current = parent
+        while current >= 0 {
+            updatedEntries[current].logicalSize -= removedEntry.logicalSize
+            updatedEntries[current].allocatedSize -= removedEntry.allocatedSize
+            updatedEntries[current].fileCount -= removedEntry.fileCount
+            let entry = updatedEntries[current]
+            let start = Int(entry.childStart)
+            let end = start + Int(entry.childCount)
+            var status = entry.ownScanStatus
+            if status == .complete && updatedLinks[start..<end].contains(where: { updatedEntries[$0].scanStatus != .complete }) {
+                status = .partial
+            }
+            updatedEntries[current].scanStatus = status
+            let ancestor = Int(entry.parent)
+            if ancestor >= 0 {
+                let ancestorEntry = updatedEntries[ancestor]
+                let first = Int(ancestorEntry.childStart)
+                let last = first + Int(ancestorEntry.childCount)
+                updatedLinks[first..<last].sort {
+                    let left = updatedEntries[$0]
+                    let right = updatedEntries[$1]
+                    let leftSize = left.size(in: sizeMode)
+                    let rightSize = right.size(in: sizeMode)
+                    return leftSize == rightSize
+                        ? names[Int(left.name)].compare(names[Int(right.name)], options: [.numeric, .caseInsensitive]) == .orderedDescending
+                        : leftSize > rightSize
+                }
+            }
+            current = ancestor
+        }
+        return DiskIndex(
+            rootURL: rootURL, sizeMode: sizeMode, kinds: kinds, entries: updatedEntries, names: names,
+            childLinks: updatedLinks, histograms: histograms, hardLinks: hardLinks, clones: clones,
+            volumeSpace: volumeSpace, tombstoneCount: tombstoneCount + removed.count
+        )
     }
 
     /// A drilled small file may be represented only by its parent's histogram.
@@ -305,7 +377,13 @@ final class DiskIndex: Sendable {
         guard targetParts.count > rootParts.count, targetParts.starts(with: rootParts),
               root.fileCount > (find(url: url)?.fileCount ?? 0) else { return false }
         let knownIdentities = Set(hardLinks.values.map(\.identity))
-        return replacement.hardLinks.values.contains { !knownIdentities.contains($0.identity) }
+        if replacement.hardLinks.values.contains(where: { !knownIdentities.contains($0.identity) }) {
+            return true
+        }
+        // A clone group introduces the same aliasing risk: an identity absent from the
+        // retained arena may share extents with a name that was aggregated or unreadable.
+        let knownClones = Set(clones.values.map(\.identity))
+        return replacement.clones.values.contains { !knownClones.contains($0.identity) }
     }
 
     /// Replaces one scanned directory without observing any unaffected filesystem paths.
@@ -328,7 +406,7 @@ final class DiskIndex: Sendable {
         let freshLinks = replacement.hardLinkIDs()
         var remapping = [Int](repeating: -1, count: entries.count)
         for id in entries.indices {
-            if id == excluded { continue }
+            if id == excluded || entries[id].parent == -2 { continue }
             let oldParent = Int(entries[id].parent)
             if oldParent >= 0, remapping[oldParent] < 0 { continue }
             remapping[id] = appendEntry(
@@ -363,6 +441,7 @@ final class DiskIndex: Sendable {
             if !childEntry.isDirectory, childEntry.scanStatus != .complete {
                 builder.markIncomplete(root, status: .partial)
             } else if !childEntry.isDirectory, hardLinks[child] == nil,
+                      clones[child] == nil,
                       childEntry.logicalSize < ScanFileSelection.smallFileByteLimit {
                 _ = appendEntry(at: child, to: builder, parent: root)
             }
@@ -381,6 +460,7 @@ final class DiskIndex: Sendable {
     private func appendSubtree(at root: Int, to builder: DiskIndexBuilder, parent: Int, rootName: String? = nil) {
         var remapping = [Int](repeating: -1, count: entries.count)
         for id in root..<entries.count {
+            if entries[id].parent == -2 { continue }
             let oldParent = Int(entries[id].parent)
             if id != root, oldParent < 0 || remapping[oldParent] < 0 { continue }
             remapping[id] = appendEntry(
@@ -396,10 +476,14 @@ final class DiskIndex: Sendable {
     ) -> Int {
         let entry = entries[id]
         let record = hardLinks[id]
+        let cloneRecord = clones[id]
         let fresh = record.flatMap { freshLinks[$0.identity] }
         let source = fresh == nil ? self : (freshIndex ?? self)
         let sourceEntry = fresh.map { source.entry(at: $0) } ?? entry
         let sourceRecord = fresh.flatMap { source.hardLink(at: $0) } ?? record
+        // A freshly observed hard-link source is authoritative for clone metadata too:
+        // losing its clone identity must count the allocation in full, not retain stale sharing.
+        let resolvedClone = fresh.map { source.clone(at: $0) } ?? (fresh == nil ? cloneRecord : nil)
         let kind = source.kind(at: sourceEntry.kind)
         let kindID = builder.internKind(identifier: kind.identifier, fallbackName: kind.name)
         let mappedBins = bins(of: id).map { bin in
@@ -412,11 +496,13 @@ final class DiskIndex: Sendable {
         }
         return builder.append(
             parent: parent, name: name ?? self.name(of: id),
-            logicalSize: sourceRecord?.logicalSize ?? entry.logicalSize,
-            allocatedSize: sourceRecord?.allocatedSize ?? entry.allocatedSize,
+            logicalSize: sourceRecord?.logicalSize ?? resolvedClone?.logicalSize ?? entry.logicalSize,
+            allocatedSize: sourceRecord?.allocatedSize ?? resolvedClone?.allocatedSize ?? entry.allocatedSize,
             fileCount: entry.fileCount, isDirectory: entry.isDirectory, kind: kindID,
             isPackage: sourceEntry.isPackage, isAggregate: entry.isAggregate, bins: mappedBins,
-            scanStatus: sourceEntry.ownScanStatus, hardLink: record?.identity
+            scanStatus: sourceEntry.ownScanStatus, hardLink: record?.identity,
+            cloneIdentity: resolvedClone?.identity,
+            cloneDataAllocatedSize: resolvedClone?.sharedDataAllocatedSize ?? 0
         )
     }
 
@@ -425,20 +511,27 @@ final class DiskIndex: Sendable {
         var remapping = [Int](repeating: -1, count: entries.count)
         for id in entries.indices {
             let entry = entries[id]
-            if id == excluded { continue }
+            if id == excluded || entry.parent == -2 { continue }
             let parent = Int(entry.parent)
             if parent >= 0, remapping[parent] < 0 { continue }
             let bins = id == replacement ? replacementBins : Array(bins(of: id))
             let hardLink = hardLinks[id]
-            let logicalSize = entry.isAggregate ? bins.reduce(Int64(0)) { $0 + $1.logicalSize } : hardLink?.logicalSize ?? entry.logicalSize
-            let allocatedSize = entry.isAggregate ? bins.reduce(Int64(0)) { $0 + $1.allocatedSize } : hardLink?.allocatedSize ?? entry.allocatedSize
+            let clone = clones[id]
+            let logicalSize = entry.isAggregate
+                ? bins.reduce(Int64(0)) { $0 + $1.logicalSize }
+                : hardLink?.logicalSize ?? clone?.logicalSize ?? entry.logicalSize
+            let allocatedSize = entry.isAggregate
+                ? bins.reduce(Int64(0)) { $0 + $1.allocatedSize }
+                : hardLink?.allocatedSize ?? clone?.allocatedSize ?? entry.allocatedSize
             let count = entry.isAggregate ? bins.reduce(0) { $0 + $1.count } : entry.fileCount
             remapping[id] = builder.append(
                 parent: parent < 0 ? -1 : remapping[parent], name: name(of: id),
                 logicalSize: logicalSize, allocatedSize: allocatedSize, fileCount: count,
                 isDirectory: entry.isDirectory, kind: entry.kind, isPackage: entry.isPackage,
                 isAggregate: entry.isAggregate, bins: bins, scanStatus: entry.ownScanStatus,
-                hardLink: hardLink?.identity
+                hardLink: hardLink?.identity,
+                cloneIdentity: clone?.identity,
+                cloneDataAllocatedSize: clone?.sharedDataAllocatedSize ?? 0
             )
         }
         return builder.finish(volumeSpace: volumeSpace)

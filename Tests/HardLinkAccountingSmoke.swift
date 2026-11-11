@@ -179,6 +179,301 @@ struct HardLinkAccountingSmoke {
         try conserved(reconciled[1].root.index, logical: ordinary.logical * 59, allocated: ordinary.allocated * 59, count: 59)
     }
 
+    private static func cloneFile(_ source: URL, _ destination: URL) throws {
+        let status = source.withUnsafeFileSystemRepresentation { sourcePath in
+            destination.withUnsafeFileSystemRepresentation { destinationPath in
+                guard let sourcePath, let destinationPath else { return Int32(-1) }
+                return clonefile(sourcePath, destinationPath, 0)
+            }
+        }
+        guard status == 0 else {
+            throw Failure(description: "clonefile failed for \(destination.path): errno \(errno)")
+        }
+    }
+
+    private static func cloneScenario(root: URL) async throws {
+        let manager = FileManager.default
+        try manager.createDirectory(at: root, withIntermediateDirectories: true)
+        let full = root.appendingPathComponent("Full")
+        try manager.createDirectory(at: full, withIntermediateDirectories: true)
+
+        let source = full.appendingPathComponent("source.bin")
+        try Data(repeating: 0xa5, count: 1_048_576).write(to: source)
+        let sourceMeasures = try measures(source)
+        try check(sourceMeasures.allocated >= 1_048_576, "Clone fixture data fork was not allocated")
+
+        let hard = full.appendingPathComponent("hard.bin")
+        try manager.linkItem(at: source, to: hard)
+        let cloned = full.appendingPathComponent("clone.bin")
+        try cloneFile(source, cloned)
+        let cloneMeasures = try measures(cloned)
+        try check(cloneMeasures.allocated == sourceMeasures.allocated, "APFS clone did not expose equivalent allocated blocks")
+        try check(CloneFileMetadata.read(at: cloned)?.isFullClone == true, "Full clone metadata was not recognized")
+
+        let partial = full.appendingPathComponent("partial.bin")
+        try cloneFile(source, partial)
+        let partialHandle = try FileHandle(forWritingTo: partial)
+        _ = try partialHandle.seek(toOffset: 512 * 1024)
+        try partialHandle.write(contentsOf: Data([0x00]))
+        try partialHandle.synchronize()
+        try partialHandle.close()
+        let partialMeasures = try measures(partial)
+        if let partialMetadata = CloneFileMetadata.read(at: partial) {
+            try check(!partialMetadata.isFullClone, "A partially diverged clone reported a full-clone identity")
+        }
+
+        let grouped = full.appendingPathComponent("Grouped")
+        try manager.createDirectory(at: grouped, withIntermediateDirectories: true)
+        for number in 0..<60 {
+            try Data(repeating: UInt8(number + 1), count: 256).write(to: grouped.appendingPathComponent("ordinary-\(number).bin"))
+        }
+        let smallSource = grouped.appendingPathComponent("small-source.bin")
+        try Data(repeating: 0x11, count: 512).write(to: smallSource)
+        let smallClone = grouped.appendingPathComponent("small-clone.bin")
+        try cloneFile(smallSource, smallClone)
+        let smallMeasures = try measures(smallSource)
+        let ordinaryMeasures = try measures(grouped.appendingPathComponent("ordinary-0.bin"))
+        try check(smallMeasures.allocated > 0, "Small clone fixture was not allocated")
+
+        let expectedLogical = sourceMeasures.logical + cloneMeasures.logical + partialMeasures.logical
+            + ordinaryMeasures.logical * 60 + smallMeasures.logical * 2
+        let expectedAllocated = sourceMeasures.allocated + partialMeasures.allocated
+            + ordinaryMeasures.allocated * 60 + smallMeasures.allocated
+
+        var result = try await scan(root)
+        var index = result.root.index
+        let sourceNode = try node(source, in: index)
+        let hardNode = try node(hard, in: index)
+        let cloneNode = try node(cloned, in: index)
+        let partialNode = try node(partial, in: index)
+        guard let sourceLink = index.hardLink(at: sourceNode.id),
+              let hardLink = index.hardLink(at: hardNode.id) else {
+            throw Failure(description: "Clone fixture hard links lost their metadata")
+        }
+        try check(sourceLink.identity == hardLink.identity, "Hard links do not share filesystem identity")
+        try check(sourceLink.ownerID == hardLink.ownerID && sourceLink.ownerID == min(sourceNode.id, hardNode.id), "Hard links must charge one owner")
+        try check(sourceNode.logicalSize + hardNode.logicalSize == sourceMeasures.logical, "Hard links must charge one logical name")
+        guard let sourceClone = index.clone(at: sourceNode.id),
+              let cloneRecord = index.clone(at: cloneNode.id) else {
+            throw Failure(description: "Full clones lost their extent group metadata")
+        }
+        try check(sourceClone.identity == cloneRecord.identity, "Full clones do not share extent identity")
+        try check(sourceClone.ownerID == cloneRecord.ownerID, "Clone members disagree about the shared owner")
+        let cloneMembers = [sourceNode, hardNode, cloneNode]
+        try check(cloneMembers.contains { $0.id == sourceClone.ownerID && $0.allocatedSize == sourceMeasures.allocated }, "One clone member must own the data fork")
+        try check(cloneMembers.filter { $0.allocatedSize == 0 }.count == 2, "Nonowning clone members must keep only independent allocation")
+        try check(cloneNode.logicalSize == cloneMeasures.logical, "A clone lost its per-name logical size")
+        try check(index.clone(at: partialNode.id) == nil, "A partial clone was treated as a full clone")
+        try check(partialNode.allocatedSize == partialMeasures.allocated, "A partial clone was deduplicated")
+
+        let groupedNode = try node(grouped, in: index)
+        let groups = groupedNode.children.filter(\.isAggregate)
+        try check(groups.count == 1 && groups[0].fileCount == 60, "Clone names were absorbed by the small-file aggregate")
+        try check(groupedNode.children.count == 3, "Small clones must stay individually addressable")
+        let smallSourceNode = try node(smallSource, in: index)
+        let smallCloneNode = try node(smallClone, in: index)
+        guard let smallSourceRecord = index.clone(at: smallSourceNode.id),
+              let smallCloneRecord = index.clone(at: smallCloneNode.id) else {
+            throw Failure(description: "Grouped small clones lost their extent identity")
+        }
+        try check(smallSourceRecord.identity == smallCloneRecord.identity, "Small clones do not share extent identity")
+        try check(smallSourceNode.id == smallSourceRecord.ownerID || smallCloneNode.id == smallSourceRecord.ownerID, "Small clone owner is not a group member")
+        try check([smallSourceNode, smallCloneNode].filter { $0.allocatedSize == smallMeasures.allocated }.count == 1, "Small clones must charge one data fork")
+        try check(smallSourceNode.logicalSize == smallMeasures.logical && smallCloneNode.logicalSize == smallMeasures.logical, "Small clones lost per-name logical sizes")
+        try check(index.clone(at: groups[0].id) == nil, "The ordinary aggregate acquired clone metadata")
+        try conserved(index, logical: expectedLogical, allocated: expectedAllocated, count: 66)
+        let physical = index.withSizeMode(.physical)
+        try check(physical.clone(at: cloneNode.id)?.ownerID == cloneRecord.ownerID, "Size toggle lost clone ownership")
+        let sampled = index.withVolumeSpace(VolumeSpaceSnapshot(volumeURL: root, capacityBytes: 100_000_000, freeBytes: 50_000_000))
+        try check(sampled.clone(at: cloneNode.id)?.ownerID == cloneRecord.ownerID, "Volume sample lost clone ownership")
+
+        result = try await remove(cloned, from: [result])[0]
+        index = result.root.index
+        try check(index.find(url: cloned) == nil, "Deleted clone retained its name")
+        let survivorSource = try node(source, in: index)
+        let survivorHard = try node(hard, in: index)
+        let survivorGroup = [survivorSource, survivorHard]
+        guard let survivorLink = index.hardLink(at: survivorSource.id),
+              let survivorHardLink = index.hardLink(at: survivorHard.id) else {
+            throw Failure(description: "Surviving hard links lost their metadata")
+        }
+        try check(survivorLink.ownerID == survivorHardLink.ownerID && survivorLink.identity == survivorHardLink.identity, "Hard-link ownership broke after clone deletion")
+        try check(survivorGroup.reduce(Int64(0)) { $0 + $1.logicalSize } == sourceMeasures.logical, "Surviving hard links lost their logical charge")
+        try check(survivorGroup.filter { $0.allocatedSize == sourceMeasures.allocated }.count == 1, "Clone deletion changed the retained data-fork charge")
+        guard let survivingClone = survivorGroup.compactMap({ index.clone(at: $0.id) }).first else {
+            throw Failure(description: "Surviving hard links lost their clone record")
+        }
+        try check(survivorGroup.contains { $0.id == survivingClone.ownerID && $0.allocatedSize == sourceMeasures.allocated }, "The surviving clone owner lost the data-fork charge")
+        try conserved(index, logical: expectedLogical - cloneMeasures.logical, allocated: expectedAllocated, count: 65)
+
+        result = try await remove(source, from: [result])[0]
+        index = result.root.index
+        let lastHard = try node(hard, in: index)
+        try check(lastHard.logicalSize == sourceMeasures.logical && lastHard.allocatedSize == sourceMeasures.allocated, "The surviving hard link did not take over both measures")
+        guard let promoted = index.clone(at: lastHard.id) else {
+            throw Failure(description: "The surviving hard link lost its clone record")
+        }
+        try check(promoted.ownerID == lastHard.id && promoted.identity == sourceClone.identity, "The surviving hard link was not promoted to clone owner")
+        try check(promoted.logicalSize == sourceMeasures.logical && promoted.allocatedSize == sourceMeasures.allocated, "Promotion lost the original measures")
+        try conserved(index, logical: expectedLogical - cloneMeasures.logical, allocated: expectedAllocated, count: 64)
+
+        result = try await remove(hard, from: [result])[0]
+        index = result.root.index
+        try check(index.find(url: hard) == nil, "The last clone-group name survived deletion")
+        try conserved(index, logical: expectedLogical - sourceMeasures.logical - cloneMeasures.logical, allocated: expectedAllocated - sourceMeasures.allocated, count: 63)
+    }
+
+    private static func cloneRefresh(root: URL) async throws {
+        let manager = FileManager.default
+        try manager.createDirectory(at: root, withIntermediateDirectories: true)
+        let sourceDirectory = root.appendingPathComponent("Source")
+        let targetDirectory = root.appendingPathComponent("Target")
+        let outsideDirectory = root.appendingPathComponent("Outside")
+        for directory in [sourceDirectory, targetDirectory, outsideDirectory] {
+            try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        let owner = sourceDirectory.appendingPathComponent("owner.bin")
+        try Data(repeating: 0x3c, count: 1_048_576).write(to: owner)
+        let ownerMeasures = try measures(owner)
+        let member = targetDirectory.appendingPathComponent("member.bin")
+        try cloneFile(owner, member)
+        let memberMeasures = try measures(member)
+        guard let ownerMetadata = CloneFileMetadata.read(at: owner), ownerMetadata.isFullClone,
+              let memberMetadata = CloneFileMetadata.read(at: member), memberMetadata.isFullClone else {
+            throw Failure(description: "Full clones were not recognized before scanning")
+        }
+        try check(ownerMetadata.identity == memberMetadata.identity, "Full clones do not share extent identity before scanning")
+
+        let initial = try await scan(root)
+        let initialOwner = try node(owner, in: initial.root.index)
+        let initialMember = try node(member, in: initial.root.index)
+        guard let initialOwnerRecord = initial.root.index.clone(at: initialOwner.id),
+              let initialMemberRecord = initial.root.index.clone(at: initialMember.id) else {
+            throw Failure(description: "Initial clone scan lost extent identity")
+        }
+        try check(initialOwnerRecord.identity == initialMemberRecord.identity, "Initial clone scan split an extent group")
+        try conserved(initial.root.index, logical: ownerMeasures.logical * 2, allocated: ownerMeasures.allocated, count: 2)
+
+        let targetScan = try await scan(targetDirectory)
+        let knownRefresh = IndexRefresh(url: targetDirectory, replacement: targetScan.root.index)
+        try check(!knownRefresh.requiresFullRescan(for: [initial]), "A known clone identity forced a full rescan")
+        var results = knownRefresh.apply(to: [initial])
+        var index = results[0].root.index
+        let ownerNode = try node(owner, in: index)
+        let memberNode = try node(member, in: index)
+        guard let ownerRecord = index.clone(at: ownerNode.id),
+              let memberRecord = index.clone(at: memberNode.id) else {
+            throw Failure(description: "Grafted clone lost its extent identity")
+        }
+        try check(ownerRecord.identity == memberRecord.identity, "Grafted clone members disagree about identity")
+        try check(ownerRecord.ownerID == ownerNode.id && memberRecord.ownerID == ownerNode.id, "Graft did not retain the outside owner")
+        try check(ownerNode.allocatedSize == ownerMeasures.allocated && memberNode.allocatedSize == 0, "Graft did not deduplicate the clone data fork")
+        try check(memberNode.logicalSize == memberMeasures.logical, "Graft changed a clone's logical size")
+        try conserved(index, logical: ownerMeasures.logical * 2, allocated: ownerMeasures.allocated, count: 2)
+
+        let lateSource = outsideDirectory.appendingPathComponent("late-source.bin")
+        try Data(repeating: 0x71, count: 65_536).write(to: lateSource)
+        let lateMeasures = try measures(lateSource)
+        let lateClone = targetDirectory.appendingPathComponent("late-clone.bin")
+        try cloneFile(lateSource, lateClone)
+        let ambiguousScan = try await scan(targetDirectory)
+        let ambiguous = IndexRefresh(url: targetDirectory, replacement: ambiguousScan.root.index)
+        try check(ambiguous.requiresFullRescan(for: results), "An unknown clone identity did not force a conservative rescan")
+        let wholeScan = try await scan(root)
+        let wholeRefresh = IndexRefresh(url: root, replacement: wholeScan.root.index)
+        try check(!wholeRefresh.requiresFullRescan(for: results), "A whole-root replacement unnecessarily forced another scan")
+        results = wholeRefresh.apply(to: results)
+        index = results[0].root.index
+        let lateSourceNode = try node(lateSource, in: index)
+        let lateCloneNode = try node(lateClone, in: index)
+        guard let lateSourceRecord = index.clone(at: lateSourceNode.id),
+              let lateCloneRecord = index.clone(at: lateCloneNode.id) else {
+            throw Failure(description: "Whole-root refresh lost the late clone identity")
+        }
+        try check(lateSourceRecord.identity == lateCloneRecord.identity, "Whole-root refresh did not rejoin the late clone group")
+        try check([lateSourceNode.id, lateCloneNode.id].contains(lateSourceRecord.ownerID), "Late clone owner is not a group member")
+        try conserved(
+            index, logical: ownerMeasures.logical * 2 + lateMeasures.logical * 2,
+            allocated: ownerMeasures.allocated + lateMeasures.allocated, count: 4
+        )
+
+        let partial = targetDirectory.appendingPathComponent("partial.bin")
+        try cloneFile(owner, partial)
+        let partialHandle = try FileHandle(forWritingTo: partial)
+        _ = try partialHandle.seek(toOffset: 4096)
+        try partialHandle.write(contentsOf: Data([0x00]))
+        try partialHandle.synchronize()
+        try partialHandle.close()
+        let partialMeasures = try measures(partial)
+        if let partialMetadata = CloneFileMetadata.read(at: partial) {
+            try check(!partialMetadata.isFullClone, "A partially diverged clone reported a full-clone identity during refresh")
+        }
+        let partialScan = try await scan(targetDirectory)
+        let partialRefresh = IndexRefresh(url: targetDirectory, replacement: partialScan.root.index)
+        try check(!partialRefresh.requiresFullRescan(for: results), "An unknown partial clone forced a rescan")
+        results = partialRefresh.apply(to: results)
+        index = results[0].root.index
+        let partialNode = try node(partial, in: index)
+        try check(index.clone(at: partialNode.id) == nil && partialNode.allocatedSize == partialMeasures.allocated, "Refresh deduplicated a partial clone")
+        try conserved(
+            index, logical: ownerMeasures.logical * 2 + lateMeasures.logical * 2 + partialMeasures.logical,
+            allocated: ownerMeasures.allocated + lateMeasures.allocated + partialMeasures.allocated, count: 5
+        )
+    }
+
+    private static func unsharedDeletion(root: URL) throws {
+        let builder = DiskIndexBuilder(rootURL: root)
+        let rootID = builder.append(parent: -1, name: root.lastPathComponent, isDirectory: true)
+        let first = builder.append(parent: rootID, name: "first", isDirectory: true)
+        let removed = builder.append(parent: first, name: "removed", isDirectory: true)
+        builder.append(parent: removed, name: "file", logicalSize: 30, allocatedSize: 40, fileCount: 1, isDirectory: false)
+        builder.append(parent: removed, name: "unreadable", isDirectory: true, scanStatus: .unreadable)
+        builder.append(parent: first, name: "kept", logicalSize: 10, allocatedSize: 20, fileCount: 1, isDirectory: false)
+        let second = builder.append(parent: rootID, name: "second", isDirectory: true)
+        builder.append(parent: second, name: "file", logicalSize: 20, allocatedSize: 30, fileCount: 1, isDirectory: false)
+        let original = builder.finish()
+        let updated = original.removingSubtree(at: removed)
+        try check(original.root.logicalSize == 60 && original.root.scanStatus == .partial, "Deletion mutated the original snapshot")
+        try conserved(original, logical: 60, allocated: 90, count: 3)
+        try conserved(updated, logical: 30, allocated: 50, count: 2)
+        try check(updated.find(url: root.appendingPathComponent("first"))?.id == first, "Retained node ID changed")
+        try check(Array(updated.childIDs(of: first)).count == 1, "Deleted child link remains reachable")
+        try check(updated.root.logicalSize == 30 && updated.root.allocatedSize == 50 && updated.root.fileCount == 2, "Deletion did not update ancestor totals")
+        try check(updated.root.scanStatus == .complete && updated.unavailableEntryCount == 0, "Deletion retained an unavailable descendant")
+        try check(updated.find(url: root.appendingPathComponent("first/removed")) == nil, "Deleted subtree remains reachable")
+        try check(updated.childIDs(of: rootID).first == second, "Deletion did not reorder changed ancestors")
+        let secondDeletion = updated.removingSubtree(at: second)
+        try check(secondDeletion.root.logicalSize == 10 && updated.root.logicalSize == 30, "Repeated deletion mutated a snapshot or lost totals")
+        let copied = updated.copyingSubtree(at: rootID, sizeMode: .logical)
+        try check(copied.root.logicalSize == 30 && copied.find(url: root.appendingPathComponent("first/removed")) == nil, "Subtree copy resurrected deleted entries")
+    }
+
+    private static func sharedDeletionAfterTombstone(root: URL, ownerInside: Bool) throws {
+        let builder = DiskIndexBuilder(rootURL: root)
+        let top = builder.append(parent: -1, name: root.lastPathComponent, isDirectory: true)
+        let inside = builder.append(parent: top, name: "inside", isDirectory: true)
+        let outside = builder.append(parent: top, name: "outside", isDirectory: true)
+        let noise = builder.append(parent: top, name: "noise", logicalSize: 1, allocatedSize: 1, fileCount: 1, isDirectory: false)
+        let link = FileIdentity(device: 1, inode: 42)
+        let clone = CloneFileMetadata.Identity(device: 1, stream: 43)
+        for parent in ownerInside ? [inside, outside] : [outside, inside] {
+            builder.append(parent: parent, name: "link", logicalSize: 10, allocatedSize: 80, fileCount: 1, isDirectory: false, hardLink: link)
+            builder.append(parent: parent, name: "clone", logicalSize: 10, allocatedSize: 80, fileCount: 1, isDirectory: false, cloneIdentity: clone, cloneDataAllocatedSize: 60)
+        }
+        let original = builder.finish()
+        let withoutNoise = original.removingSubtree(at: noise)
+        let result = withoutNoise.removingSubtree(at: inside)
+        try conserved(original, logical: 31, allocated: 181, count: 5)
+        try conserved(withoutNoise, logical: 30, allocated: 180, count: 4)
+        try conserved(result, logical: 20, allocated: 160, count: 2)
+        try check(result.find(url: root.appendingPathComponent("noise")) == nil, "Rebuild resurrected a tombstone")
+        try check(result.find(url: root.appendingPathComponent("inside")) == nil, "Shared subtree survived deletion")
+        let remainingLink = try node(root.appendingPathComponent("outside/link"), in: result)
+        let remainingClone = try node(root.appendingPathComponent("outside/clone"), in: result)
+        try check(result.hardLink(at: remainingLink.id)?.ownerID == remainingLink.id, "Hardlink ownership was not retained or transferred")
+        try check(result.clone(at: remainingClone.id)?.ownerID == remainingClone.id, "Clone ownership was not retained or transferred")
+    }
+
     private static func retainedState(root: URL) throws {
         let builder = DiskIndexBuilder(rootURL: root)
         let rootID = builder.append(parent: -1, name: root.lastPathComponent, isDirectory: true)
@@ -223,6 +518,12 @@ struct HardLinkAccountingSmoke {
             }
         }
         try retainedState(root: root.appendingPathComponent("State"))
-        print("PASS: hardlink names and single-owner bytes; owning/nonowning file and directory deletion; surviving promotion and last link; logical/physical and kind conservation; ordinary aggregation/detail deletion; retained status and volume snapshots")
+        try unsharedDeletion(root: root.appendingPathComponent("Unshared"))
+        for ownerInside in [false, true] {
+            try sharedDeletionAfterTombstone(root: root.appendingPathComponent("Shared-\(ownerInside)"), ownerInside: ownerInside)
+        }
+        try await cloneScenario(root: root.appendingPathComponent("Clones"))
+        try await cloneRefresh(root: root.appendingPathComponent("CloneRefresh"))
+        print("PASS: hardlink names and single-owner bytes; owning/nonowning file and directory deletion; surviving promotion and last link; logical/physical and kind conservation; ordinary aggregation/detail deletion; retained status and volume snapshots; full/partial APFS clone data-fork dedup, per-name logical sizes, grouped small clones, clone-owner promotion, and conservative refresh")
     }
 }

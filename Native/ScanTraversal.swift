@@ -24,6 +24,7 @@ final class ScanTraversal {
     private var totals = ScanTypeAccumulator()
     private var currentDirectoryURL: URL?
     private var observedHardLinks: Set<FileIdentity> = []
+    private var cloneCharges = CloneChargeLedger()
 
     init(request: ScanRequest, continuation: AsyncThrowingStream<ScanResult, Error>.Continuation) {
         self.request = request
@@ -66,7 +67,9 @@ final class ScanTraversal {
             builder.append(
                 parent: -1, name: rootName, logicalSize: logicalSize, allocatedSize: allocatedSize,
                 fileCount: 1, isDirectory: false, kind: root.kind, isPackage: root.isPackage,
-                scanStatus: root.status, hardLink: root.hardLink
+                scanStatus: root.status, hardLink: root.hardLink,
+                cloneIdentity: root.clone?.identity,
+                cloneDataAllocatedSize: root.clone?.dataAllocatedSize ?? 0
             )
             try publishFinal()
             return
@@ -118,7 +121,7 @@ final class ScanTraversal {
                     }
                 }
             } else if let logicalSize = entry.logicalSize, request.fileSelection.includes(size: logicalSize),
-                      request.fileSelection == .all || entry.hardLink == nil {
+                      request.fileSelection == .all || (entry.hardLink == nil && entry.clone == nil) {
                 observeFile(entry, in: frame)
             }
             publishIfDue(currentURL: entry.url)
@@ -129,9 +132,18 @@ final class ScanTraversal {
     private func observeFile(_ entry: Metadata, in frame: ScanDirectoryFrame) {
         guard let logicalSize = entry.logicalSize, let allocatedSize = entry.allocatedSize else { return }
         autoreleasepool {
-            let ownsBytes = entry.hardLink.map { observedHardLinks.insert($0).inserted } ?? true
-            totals.add(logicalSize: ownsBytes ? logicalSize : 0, allocatedSize: ownsBytes ? allocatedSize : 0, kind: entry.kind)
-            if request.fileSelection == .all, entry.hardLink == nil, logicalSize < ScanFileSelection.smallFileByteLimit {
+            let ownsHardLink = entry.hardLink.map { observedHardLinks.insert($0).inserted } ?? true
+            let chargedAllocated = cloneCharges.charge(
+                allocatedSize: ownsHardLink ? allocatedSize : 0,
+                sharedDataAllocatedSize: entry.clone?.dataAllocatedSize ?? 0,
+                identity: entry.clone?.identity
+            )
+            totals.add(
+                logicalSize: ownsHardLink ? logicalSize : 0,
+                allocatedSize: chargedAllocated, kind: entry.kind
+            )
+            if request.fileSelection == .all, entry.hardLink == nil, entry.clone == nil,
+               logicalSize < ScanFileSelection.smallFileByteLimit {
                 frame.smallFiles.add(
                     name: entry.url.lastPathComponent, logicalSize: logicalSize, allocatedSize: allocatedSize,
                     kind: entry.kind, isPackage: entry.isPackage
@@ -140,7 +152,9 @@ final class ScanTraversal {
                 builder.append(
                     parent: frame.id, name: entry.url.lastPathComponent,
                     logicalSize: logicalSize, allocatedSize: allocatedSize, fileCount: 1,
-                    isDirectory: false, kind: entry.kind, isPackage: entry.isPackage, hardLink: entry.hardLink
+                    isDirectory: false, kind: entry.kind, isPackage: entry.isPackage, hardLink: entry.hardLink,
+                    cloneIdentity: entry.clone?.identity,
+                    cloneDataAllocatedSize: entry.clone?.dataAllocatedSize ?? 0
                 )
             }
         }
@@ -246,6 +260,7 @@ final class ScanTraversal {
         var logicalSize: Int64?
         var allocatedSize: Int64?
         var hardLink: FileIdentity?
+        var clone: CloneFileMetadata?
         var status = ScanEntryStatus.complete
         if isDirectory || values.linkCount == nil || (values.linkCount ?? 1) > 1 {
             var identity = stat()
@@ -266,6 +281,13 @@ final class ScanTraversal {
             }
             logicalSize = Int64(logical)
             allocatedSize = Int64(allocated)
+            if allocated > 0, let metadata = CloneFileMetadata.read(at: url),
+               metadata.isFullClone, metadata.dataAllocatedSize > 0,
+               metadata.dataAllocatedSize <= Int64(allocated) {
+                // Partially diverged clones still share extents; without a recognized
+                // full-clone identity their allocation must be counted in full.
+                clone = metadata
+            }
         }
         let kind = builder.internKind(
             identifier: values.typeIdentifier ?? (isDirectory ? "public.folder" : "public.data"),
@@ -276,7 +298,7 @@ final class ScanTraversal {
         return Metadata(
             url: cleanURL, isSymbolicLink: false, isDirectory: isDirectory, isRegularFile: isRegularFile,
             isPackage: values.isPackage ?? false, logicalSize: logicalSize, allocatedSize: allocatedSize,
-            kind: kind, volume: volume, status: status, hardLink: hardLink
+            kind: kind, volume: volume, status: status, hardLink: hardLink, clone: clone
         )
     }
 
@@ -346,6 +368,7 @@ final class ScanTraversal {
         var volume: URL?
         var status = ScanEntryStatus.complete
         var hardLink: FileIdentity?
+        var clone: CloneFileMetadata?
     }
 
     private enum EnumerationStep {

@@ -21,15 +21,15 @@ The original application also informed file-kind classification, ranked colors, 
 | Application implementation | Standalone Swift 6 / AppKit executable, built with Command Line Tools; no OmniGroup or legacy TreeMapView runtime binaries. |
 | Scan representation | Compact numeric index, pooled component names and shared cached views instead of a heavyweight object for every retained file. |
 | Small files | More than 50 immediate regular files smaller than 1 MB in a directory are grouped with exact totals and kind/size histograms. An explicit detail view scans their individual names. Hardlinked files remain individual. |
-| Scanning lifecycle | Background scanning with progress and cancellation. Partial progress does not replace the last completed tree or map. Startup shows a mounted-volume picker instead of immediately scanning the disk. |
+| Scanning lifecycle | Background scanning with progress and cancellation. The progress dialog keeps a fixed width and truncates long paths during permission checks and traversal. Progress counts and the displayed total are scanned attribution estimates, not disk used; for a whole mounted volume the dialog also shows one filesystem-reported used/free snapshot taken at scan start, never a fabricated figure for a subfolder. Partial progress does not replace the last completed tree or map. Startup shows a mounted-volume picker instead of immediately scanning the disk. |
 | Filesystem handling | Device/inode hardlink accounting, separate allocated/logical sizes, mount boundaries, reserved-root-path exclusion, and explicit unreadable, partial, cloud-only and automount states. |
-| Volume selection and accounting | Mounted-volume picker with capacity/used/free information; a whole-volume footer distinguishes scanned allocation from unaccounted or excess allocation. |
+| Volume selection and accounting | Mounted-volume picker with capacity/used/available information. A whole-volume footer keeps the filesystem capacity snapshot separate from the scanned allocation estimate, reporting either unattributed or excess estimate bytes. When supported, identical APFS clone data streams inside the scan are counted once; partially shared blocks may still be counted repeatedly. |
 | Privacy access | Scope-aware filesystem permission preflight before traversal, localized purpose descriptions, actual denied-path reporting and manual Privacy Settings guidance. |
-| Permanent deletion | Confirmed Shift–Delete and menu deletion, followed by index/map/statistics reconciliation without a full rescan on success. Surviving expansion, selection and viewport state are preserved. |
+| Permanent deletion | Confirmed Shift–Delete and menu deletion, followed by index/map/statistics reconciliation without a full rescan on success. Unshared subtrees update affected ancestors without rebuilding the whole index; hardlink and clone ownership changes use a full rebuild. Surviving expansion, selection and viewport state are preserved. |
 | Trash | Restored Move to Trash in File and context menus, with Command–Delete. Uses macOS's real Trash API, preserves file contents and reconciles the completed tree; it never falls back to permanent deletion. |
 | Selection refresh | Restored Refresh Selection in File and context menus. Rescans the selected directory and replaces that branch in the existing index, retaining surviving expansion, selection, viewport and zoom history. |
 | Map-to-tree navigation | A map click closes previously expanded branches, including remembered hidden expansions, and reveals only the selected item's ancestry. Manual tree expansion is unchanged. |
-| Path copying | Click an underlined item or overview path to copy its full filesystem path. Green inline confirmation shows that copying succeeded. |
+| Path copying | Click an underlined item or overview path to copy its full filesystem path. Green inline confirmation shows that copying succeeded. Long paths stay on one line, truncate in the middle and do not determine the window width; copying retains the full path. |
 | Presentation and installation | English/Russian interface, Disk Inventory X2 branding, miniature multicolor treemap icon, and an automatically refreshed drag-install DMG with an Applications link and arrow background. |
 
 ### Deliberate limits
@@ -37,7 +37,7 @@ The original application also informed file-kind classification, ranked colors, 
 - The native build targets **arm64 only**. Intel Macs and macOS versions older than 14 are not supported by the supplied build script.
 - This is not full feature parity with the original. The legacy preferences, inspector/help bundles, selection-list functionality and creator-code options are not implemented in the native application. Free/other-space treemap tiles are not implemented; volume differences appear in a separate footer.
 - Scans are snapshots. There is no persistent scan cache, filesystem watcher or automatic incremental refresh. Ordinary folder zoom reuses the completed index; Rescan performs a new scan.
-- Logical/allocated totals are not a measurement of uniquely reclaimable APFS storage. Clones, snapshots, metadata, shared-container volumes, inaccessible files and concurrent changes can prevent totals from matching Finder. Unaccounted space is not labeled as an exact snapshot size.
+- Logical/allocated totals and progress figures are attribution estimates, not measurements of disk used or uniquely reclaimable APFS storage. The footer reports filesystem capacity minus available space at scan completion; on APFS this can include other volumes sharing the container. Clones proven identical are counted once, but partially shared blocks may still be counted repeatedly. Snapshots, filesystem metadata, inaccessible files and concurrent changes can prevent estimates from matching Finder. Unattributed space is not labeled as an exact snapshot size.
 - The original external statistics drawer uses `NSDrawer`. Apple deprecated it, so the compiler emits a deprecation warning; it is retained intentionally for the original layout.
 
 ## Build
@@ -84,8 +84,8 @@ GitHub also provides source archives for the tag. The app ZIP is the binary dist
 To publish the next release after committing and pushing the reviewed sources:
 
 ```sh
-git tag -a v2.0.1 -m "Disk Inventory X2 2.0.1"
-git push origin v2.0.1
+git tag -a v2.0.2 -m "Disk Inventory X2 2.0.2"
+git push origin v2.0.2
 ```
 
 The workflow can also be launched manually from Actions by providing an existing release tag. Tags/releases are not overwritten automatically. The release is created as a draft and made public only after its assets are uploaded. If an interrupted upload leaves an unpublished draft, remove that draft before retrying; do not move a published version tag.
@@ -95,7 +95,7 @@ Publishing uses GitHub's built-in `GITHUB_TOKEN` with `contents: write`; no pers
 To exercise exactly the same versioned packaging locally:
 
 ```sh
-./release-native.sh v2.0.0 1
+./release-native.sh v2.0.1 1
 ```
 
 Assets are written to `build/release/`. Local builds can also override `APP_VERSION=X.Y.Z` and `APP_BUILD=N`; the checked-in plist is not rewritten by the build. Verify downloaded files from their directory with `shasum -a 256 -c SHA256SUMS.txt`.

@@ -96,6 +96,11 @@ struct SelectionInteractionSmoke {
         let secondFile = bDeep.appendingPathComponent("second.bin")
         let package = fixture.appendingPathComponent("Sample.app")
         let group = fixture.appendingPathComponent("Grouped")
+        let longFile = fixture
+            .appendingPathComponent(String(repeating: "long-directory-", count: 12))
+            .appendingPathComponent(String(repeating: "nested-directory-", count: 10))
+            .appendingPathComponent(String(repeating: "long-filename-", count: 12) + ".bin")
+        try file(longFile, size: 24_000_000)
         try file(firstFile, size: 24_000_000)
         try file(aExtra.appendingPathComponent("extra.bin"), size: 12_000_000)
         try file(secondFile, size: 24_000_000)
@@ -127,6 +132,29 @@ struct SelectionInteractionSmoke {
         try check(information.stringValue != fixture.path && information.stringValue.contains(fixture.path), "Successful copy left no inline confirmation or removed the displayed path")
         try click(information)
         try check(pasteboard.string(forType: .string) == fixture.path, "Repeated click copied the confirmation instead of the path")
+
+        guard let window = controller.window else { throw Failure(description: "Missing document window") }
+        let originalFrame = window.frame
+        try clickMap(longFile, map: map)
+        content.layoutSubtreeIfNeeded()
+        try check(content.fittingSize.width <= content.bounds.width, "Long path raised the window's minimum fitting width")
+        try check(window.frame == originalFrame, "Long hovered/selected path resized the document window")
+        try click(status)
+        content.layoutSubtreeIfNeeded()
+        try check(window.frame == originalFrame, "Long-path copy confirmation resized the document window")
+        try check(pasteboard.string(forType: .string) == longFile.path, "Truncated long path did not copy in full")
+        var resizedFrame = originalFrame
+        resizedFrame.size.width -= 120
+        window.setFrame(resizedFrame, display: true)
+        content.layoutSubtreeIfNeeded()
+        try check(window.frame == resizedFrame, "Long path prevented manual window resizing")
+        try clickMap(secondFile, map: map)
+        try clickMap(longFile, map: map)
+        content.layoutSubtreeIfNeeded()
+        try check(window.frame == resizedFrame, "Hover replaced the manually chosen window size")
+        window.setFrame(originalFrame, display: true)
+        content.layoutSubtreeIfNeeded()
+        pasteboard.setString(fixture.path, forType: .string)
 
         try expand([a, aDeep, aExtra, b, bDeep, bHidden], in: outline)
         outline.collapseItem(outline.item(atRow: try row(b, in: outline)))

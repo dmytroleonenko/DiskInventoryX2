@@ -322,7 +322,7 @@ final class InventoryWindowController: NSWindowController, NSOutlineViewDataSour
     }
 
     /// Incomplete results are progress messages, never drawable document snapshots.
-    func present(_ result: ScanResult) {
+    func present(_ result: ScanResult, precomputedStatistics: [FileTypeStat]? = nil, fullIndexStatistics: [FileTypeStat]? = nil) {
         guard result.isComplete else { progress.update(result); return }
         progress.finish()
         let previousURL = selected?.url
@@ -332,8 +332,8 @@ final class InventoryWindowController: NSWindowController, NSOutlineViewDataSour
         root = result.root
         sizeMode = result.root.index.sizeMode
         map.showPackageContents = showPackageContents
-        map.root = result.root
-        typeRows = result.root.index.presentationStatistics(for: result.root.id, showPackageContents: showPackageContents)
+        map.setRoot(result.root, fullIndexStatistics: fullIndexStatistics)
+        typeRows = precomputedStatistics ?? result.root.index.presentationStatistics(for: result.root.id, showPackageContents: showPackageContents)
         synchronizing = true
         outline.reloadData()
         kinds.reloadData()
@@ -679,7 +679,12 @@ final class InventoryWindowController: NSWindowController, NSOutlineViewDataSour
         }
         navigationHistory = Array(results.dropLast())
         selected = nil
-        present(current)
+        // Reconciliation already computed default package presentation totals off the main thread.
+        // The palette needs the entire arena, even if the current view is zoomed.
+        let fullIndexStatistics = showPackageContents ? nil : results.first {
+            $0.root.index === current.root.index && $0.root.id == 0
+        }?.typeStatistics
+        present(current, precomputedStatistics: showPackageContents ? nil : current.typeStatistics, fullIndexStatistics: fullIndexStatistics)
         if let state {
             synchronizing = true
             let selection = state.restore(in: outline, root: current.root) { stableOutlineNode($0) }
