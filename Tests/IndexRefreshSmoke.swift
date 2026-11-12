@@ -341,6 +341,14 @@ struct IndexRefreshSmoke {
         let removed = folder.appendingPathComponent("Removed/Descendant", isDirectory: true)
         let missingPlan = try await planner.directory(for: removed, scanRoot: root)
         try check(missingPlan.path == folder.path, "Missing descendant did not resolve to nearest existing parent")
+        let removedPlan = try await planner.plan(for: removed, scanRoot: root)
+        guard case .missing(let gone) = removedPlan, gone.path == folder.appendingPathComponent("Removed").path else {
+            throw Failure(description: "Missing selection was not planned as an index removal")
+        }
+        let existingPlan = try await planner.plan(for: folder, scanRoot: root)
+        guard case .scan(let rescanned) = existingPlan, rescanned.path == folder.path else {
+            throw Failure(description: "Existing directory was not planned as its own rescan")
+        }
         let before = try await scan(ScanRequest(url: root))
         let beforeFolder = try node("Existing", in: before.root.index)
         try manager.removeItem(at: folder)

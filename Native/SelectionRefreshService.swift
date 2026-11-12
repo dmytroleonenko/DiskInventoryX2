@@ -3,7 +3,22 @@ import Darwin
 
 /// Resolves only the selected path's ancestors, never following links or enumerating siblings.
 actor SelectionRefreshService {
+    enum Plan: Sendable, Equatable {
+        /// Rescan this existing directory.
+        case scan(URL)
+        /// This path (the selection or its nearest missing ancestor) is gone; drop it from the index.
+        case missing(URL)
+    }
+
+    /// Nearest existing directory to rescan; a missing path resolves to its existing parent.
     func directory(for url: URL, scanRoot: URL) throws -> URL {
+        switch try plan(for: url, scanRoot: scanRoot) {
+        case .scan(let directory): return directory
+        case .missing(let gone): return gone.deletingLastPathComponent()
+        }
+    }
+
+    func plan(for url: URL, scanRoot: URL) throws -> Plan {
         try ScanIOPolicy().perform {
             let policy = SystemPathPolicy()
             guard url.isFileURL, scanRoot.isFileURL,
@@ -36,11 +51,11 @@ actor SelectionRefreshService {
                 let candidate = directory.appendingPathComponent(component)
                 var value = stat()
                 if fstatat(descriptor, component, &value, AT_SYMLINK_NOFOLLOW) != 0 {
-                    if errno == ENOENT { return directory }
+                    if errno == ENOENT { return .missing(candidate) }
                     throw posixError(at: candidate)
                 }
                 let kind = value.st_mode & S_IFMT
-                if kind == S_IFREG, offset == parts.count - rootParts.count - 1 { return directory }
+                if kind == S_IFREG, offset == parts.count - rootParts.count - 1 { return .scan(directory) }
                 guard kind == S_IFDIR, value.st_flags & UInt32(SF_DATALESS) == 0 else {
                     throw CocoaError(.fileReadNoPermission, userInfo: [NSURLErrorKey: candidate])
                 }
@@ -62,7 +77,7 @@ actor SelectionRefreshService {
                 directory = candidate
             }
             try Task.checkCancellation()
-            return directory
+            return .scan(directory)
         }
     }
 

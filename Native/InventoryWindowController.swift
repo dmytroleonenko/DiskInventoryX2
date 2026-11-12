@@ -457,9 +457,25 @@ final class InventoryWindowController: NSWindowController, NSOutlineViewDataSour
             guard let self else { return }
             defer { self.refreshTask = nil; self.spinner.stopAnimation(nil); self.updateActions() }
             do {
-                let directory = try await refreshService.directory(for: url, scanRoot: scanRoot)
-                try Task.checkCancellation()
-                self.startScan(ScanRequest(url: directory, sizeMode: self.sizeMode), refreshing: directory)
+                switch try await refreshService.plan(for: url, scanRoot: scanRoot) {
+                case .scan(let directory):
+                    try Task.checkCancellation()
+                    self.startScan(ScanRequest(url: directory, sizeMode: self.sizeMode), refreshing: directory)
+                case .missing(let gone):
+                    try Task.checkCancellation()
+                    let results = self.navigationHistory + (self.visibleResult.map { [$0] } ?? [])
+                    // A vanished item needs no filesystem walk: prune it exactly as a deletion would.
+                    guard let node = results.lazy.compactMap({ $0.root.index.find(url: gone) }).first else {
+                        let parent = gone.deletingLastPathComponent()
+                        self.startScan(ScanRequest(url: parent, sizeMode: self.sizeMode), refreshing: parent)
+                        return
+                    }
+                    let mutation = IndexDeletion(url: node.url, logicalSize: node.logicalSize, allocatedSize: node.allocatedSize, kindIdentifier: node.kindIdentifier)
+                    let updated = await Task.detached(priority: .userInitiated) { mutation.apply(to: results) }.value
+                    try Task.checkCancellation()
+                    self.applyUpdatedResults(updated)
+                    self.status.display(String(localized: "refresh.missing", defaultValue: "Removed from disk; map and index updated.") + " — " + gone.path)
+                }
             } catch {
                 if let window = self.window { await NSAlert(error: error).beginSheetModal(for: window) }
             }

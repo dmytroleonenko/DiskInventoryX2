@@ -106,3 +106,4 @@
 "trash.progress" = "Moving to Trash…";
 "trash.done" = "Moved to Trash; map and index updated.";
 "refresh.fullScan" = "New hardlinks cross the cached scan boundary; refreshing the full scan to keep totals correct.";
+"refresh.missing" = "Removed from disk; map and index updated.";
